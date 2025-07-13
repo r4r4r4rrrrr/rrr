@@ -16,27 +16,32 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
 intents.members = True
+intents.reactions = True
 
-bot = commands.Bot(command_prefix="?", intents=intents, help_command=None)
+bot = commands.Bot(command_prefix="$", intents=intents, help_command=None)
 
 OWNER_ID = 739048881651712010
 ACTIVATION_FILE = "activated_servers.json"
 
+# Load activated servers
 try:
     with open(ACTIVATION_FILE, "r") as f:
         activated_servers = json.load(f)
 except:
     activated_servers = []
 
-user_ephemeral_messages = {}
 giveaway_entries = {}
 giveaway_messages = {}
 giveaway_winners = {}
 rerolled_history = {}
 giveaway_ended_embeds = {}
-
 active_setups = {}
 active_countdowns = {}
+
+reaction_emoji = "<a:3544giveaway:1393878076659728587>"
+reaction_emoji_name = "3544giveaway"
+arrow = "<:Screenshot_20250713_135426remove:1393870928068218940>"
+light_blue = discord.Color.from_rgb(173, 216, 230)
 
 def parse_duration(duration_str):
     units = {"d": 86400, "hr": 3600, "min": 60}
@@ -58,74 +63,29 @@ def format_time(seconds):
     return f"{d}d {h}hr {m}min" if d else f"{h}hr {m}min" if h else f"{m}min" if m else "Less than a minute"
 
 @bot.command()
-@commands.is_owner()
-async def deactivate(ctx):
-    gid = str(ctx.guild.id)
-    if gid in activated_servers:
-        return await ctx.send(embed=discord.Embed(description="Bot is already deactivated.", color=discord.Color.orange()))
-    activated_servers.append(gid)
-    with open(ACTIVATION_FILE, "w") as f:
-        json.dump(activated_servers, f)
-
-    task = active_setups.pop(ctx.guild.id, None)
-    if task:
-        task.cancel()
-
-    countdown_task = active_countdowns.pop(ctx.guild.id, None)
-    if countdown_task:
-        countdown_task.cancel()
-
-    for mid, msg in list(giveaway_messages.items()):
-        if msg.guild.id == ctx.guild.id:
-            try:
-                await msg.delete()
-            except:
-                pass
-            giveaway_messages.pop(mid, None)
-            giveaway_entries.pop(mid, None)
-            giveaway_winners.pop(mid, None)
-            giveaway_ended_embeds.pop(mid, None)
-            rerolled_history.pop(mid, None)
-
-    await ctx.send(embed=discord.Embed(description="**Bot deactivated, Owner.**", color=discord.Color.red()))
-
-@bot.command()
-@commands.is_owner()
-async def reactivate(ctx):
-    if str(ctx.guild.id) not in activated_servers:
-        return await ctx.send(embed=discord.Embed(description="Bot is already active in this server.", color=discord.Color.green()))
-    activated_servers.remove(str(ctx.guild.id))
-    with open(ACTIVATION_FILE, "w") as f:
-        json.dump(activated_servers, f)
-    await ctx.send(embed=discord.Embed(description="**Bot reactivated in this server.**", color=discord.Color.green()))
-
-@bot.command()
 @commands.has_permissions(administrator=True)
 async def help(ctx):
-    embed = discord.Embed(title="GIVEAWAY BOT COMMANDS", color=discord.Color.blurple())
-    embed.add_field(name="#1  **?giveaway**", value="- Trigger giveaway setup. Fields included : Channel, Prize, Winners-count, Duration,  Host  ", inline=False)
-    embed.add_field(name="#2  **?giveawaycancel [message_id]**", value="- Cancel a giveaway.", inline=False)
-    embed.add_field(name="#3  **?reroll <message_id> @winners**", value="- Reroll selected winners.", inline=False)
-    embed.add_field(name="#4 **?exit**", value="- Exit giveaway setup.", inline=False)
+    if str(ctx.guild.id) not in activated_servers:
+        return
+    embed = discord.Embed(title="📍 Giveaway Bot Commands", color=light_blue)
+    embed.add_field(name="#1  **$giveaway**", value="- Trigger giveaway setup. Includes: Channel, Prize-pool, Winners-count, Time, Host.", inline=False)
+    embed.add_field(name="#2  **$giveawaycancel [message_id]**", value="- Cancel an ongoing giveaway", inline=False)
+    embed.add_field(name="#3  **$reroll [message_id] @winners**", value="- Reroll selected winners", inline=False)
+    embed.add_field(name="#4  **$exit**", value="- Exit giveaway setup", inline=False)
+   
     embed.set_footer(text="Admin-only commands.")
     await ctx.send(embed=embed)
 
-def cleanup_ephemerals(giveaway_id, user_id):
-    if giveaway_id in user_ephemeral_messages and user_id in user_ephemeral_messages[giveaway_id]:
-        old = user_ephemeral_messages[giveaway_id][user_id]
-        try:
-            asyncio.create_task(old.delete())
-        except:
-            pass
-
-@bot.command()
+@bot.command(name="giveaway")
 @commands.has_permissions(administrator=True)
 async def giveaway(ctx):
-    if str(ctx.guild.id) in activated_servers:
-        return await ctx.send(embed=discord.Embed(description=" Bot is deactivated in this server.", color=discord.Color.red()))
+    if str(ctx.guild.id) not in activated_servers:
+        return await ctx.send(embed=discord.Embed(description=" This bot is deactivated in this server.", color=discord.Color.red()))
+    if ctx.message.content.strip() != "$giveaway":
+        return  # Only allow exact "$giveaway"
 
     if ctx.guild.id in active_setups:
-        return await ctx.send(embed=discord.Embed(description=" A giveaway setup is already in progress.", color=discord.Color.orange()))
+        return await ctx.send(embed=discord.Embed(description="A giveaway setup is already in progress.", color=discord.Color.orange()))
 
     setup_task = asyncio.current_task()
     active_setups[ctx.guild.id] = setup_task
@@ -133,39 +93,31 @@ async def giveaway(ctx):
     def check(m): return m.author == ctx.author and m.channel == ctx.channel
 
     steps = [
-        ("#1 Mention the channel to host the giveaway", "channel"),
-        ("#2 Prize-pool of the giveaway ?", lambda m: m.content),
-        ("#3 No of winners?", "int"),
-        ("#4 Duration of the giveaway? (Eg., 1d 2hr 30min)", "duration"),
-        ("#5 Host? (mention/name)", lambda m: m.content)
+        ("1 | Mention the channel to host the giveaway", "channel"),
+        ("2 | Prize-pool of the giveaway?", lambda m: m.content),
+        ("3 | No of winners?", "int"),
+        ("4 | Duration of the giveaway? (Eg. 1d 2hr 30min)", "duration"),
+        ("5 | Host? (mention/name)", lambda m: m.content)
     ]
     answers = []
-    user_replies = []
 
     try:
         for question, parser in steps:
             while True:
-                q_msg = await ctx.send(embed=discord.Embed(description=f"**{question}**", color=discord.Color.blurple()))
+                q_msg = await ctx.send(embed=discord.Embed(description=f"**{question}**", color=light_blue))
                 try:
                     response = await bot.wait_for("message", timeout=120.0, check=check)
                 except asyncio.TimeoutError:
                     await q_msg.delete()
-                    for m in user_replies:
-                        try: await m.delete()
-                        except: pass
                     active_setups.pop(ctx.guild.id, None)
                     return await ctx.send(embed=discord.Embed(description=" Timed out. Giveaway setup canceled.", color=discord.Color.red()))
 
                 content = response.content.strip().lower()
-                if content == "?exit":
+                if content == "$exit":
                     await q_msg.delete()
-                    try: await response.delete()
-                    except: pass
-                    for m in user_replies:
-                        try: await m.delete()
-                        except: pass
+                    await response.delete()
                     active_setups.pop(ctx.guild.id, None)
-                    return await ctx.send(embed=discord.Embed(description=" Giveaway setup canceled.", color=discord.Color.red()), delete_after=1)
+                    return await ctx.send(embed=discord.Embed(description=" Giveaway setup exited.", color=discord.Color.red()), delete_after=1)
 
                 try:
                     if parser == "int":
@@ -189,57 +141,24 @@ async def giveaway(ctx):
                 except:
                     await q_msg.delete()
                     await response.delete()
-                    await ctx.send(embed=discord.Embed(description=" Invalid input. Try again.", color=discord.Color.red()), delete_after=3)
+                    await ctx.send(embed=discord.Embed(description="Invalid input. Try again.", color=discord.Color.red()), delete_after=3)
 
         active_setups.pop(ctx.guild.id, None)
         channel, prize, winners, duration, host_tag = answers
         time_display = format_time(duration)
-        emoji = "<a:rdxm:1392170883057057802>"
-        arrow = "<:Screenshot20250709102722:1392369398727049237>"
+        emoji = "<a:outputonlinegiftools:1393594291452117113>"
         centered_title = f"{emoji} {prize} {emoji}"
 
         embed = discord.Embed(
             title=centered_title,
             description=f"{arrow} **Ends in:** {time_display}\n{arrow} **Winners:** {winners}\n{arrow} **Hosted by:** {host_tag}",
-            color=discord.Color.dark_blue()
+            color=light_blue
         )
-        embed.set_footer(text="Click the button below to enter!")
+        embed.set_footer(text="React with the emoji below to enter!")
+        msg = await channel.send(embed=embed)
+        await msg.add_reaction(discord.PartialEmoji(name="3544giveaway", animated=True, id=1393878076659728587))
 
-        class GiveawayView(discord.ui.View):
-            def __init__(self, duration):
-                super().__init__(timeout=duration)
-                self.entries = []
-                self.msg_id = None
-                self.entry_button = discord.ui.Button(label="🟢 0 Entries", style=discord.ButtonStyle.secondary, disabled=True)
-                self.add_item(self.entry_button)
-
-            @discord.ui.button(label="Enter/Exit", style=discord.ButtonStyle.primary, emoji=discord.PartialEmoji(name="partychristmas", animated=True, id=1392184654349467719))
-            async def enter(self, interaction: discord.Interaction, button: discord.ui.Button):
-                user = interaction.user
-                msg = giveaway_messages.get(self.msg_id)
-                if not msg or user.bot:
-                    return
-
-                cleanup_ephemerals(self.msg_id, user.id)
-
-                if user.id in self.entries:
-                    self.entries.remove(user.id)
-                    self.entry_button.label = f"🟢 {len(self.entries)} Entries"
-                    await msg.edit(view=self)
-                    await interaction.response.send_message(embed=discord.Embed(description="**You have opted out from giveaway !.**", color=discord.Color.red()), ephemeral=True)
-                    user_ephemeral_messages.setdefault(self.msg_id, {})[user.id] = await interaction.original_response()
-                    return
-
-                self.entries.append(user.id)
-                self.entry_button.label = f"🟢 {len(self.entries)} Entries"
-                await msg.edit(view=self)
-                await interaction.response.send_message(embed=discord.Embed(description="**You have entered the giveaway !**", color=discord.Color.green()), ephemeral=True)
-                user_ephemeral_messages.setdefault(self.msg_id, {})[user.id] = await interaction.original_response()
-
-        view = GiveawayView(duration)
-        msg = await channel.send(embed=embed, view=view)
-        view.msg_id = msg.id
-        giveaway_entries[msg.id] = view.entries
+        giveaway_entries[msg.id] = []
         giveaway_messages[msg.id] = msg
 
         async def countdown():
@@ -252,14 +171,10 @@ async def giveaway(ctx):
                     updated_embed = discord.Embed(
                         title=centered_title,
                         description=f"{arrow} **Ends in:** {t}\n{arrow} **Winners:** {winners}\n{arrow} **Hosted by:** {host_tag}",
-                        color=discord.Color.dark_blue()
+                        color=light_blue
                     )
-                    updated_embed.set_footer(text="Click the button below to enter!")
-                    view.entry_button.label = f"🟢 {len(view.entries)} Entries"
-                    try:
-                        await msg.edit(embed=updated_embed, view=view)
-                    except:
-                        pass
+                    updated_embed.set_footer(text="React with the emoji below to enter!")
+                    await msg.edit(embed=updated_embed)
 
         countdown_task = asyncio.create_task(countdown())
         active_countdowns[ctx.guild.id] = countdown_task
@@ -271,21 +186,17 @@ async def giveaway(ctx):
             active_countdowns.pop(ctx.guild.id, None)
 
         now = datetime.now(pytz.timezone("Asia/Kolkata"))
-        valid_entries = [ctx.guild.get_member(uid) for uid in view.entries if ctx.guild.get_member(uid)]
-
-        for child in view.children:
-            child.disabled = True
+        valid_entries = [ctx.guild.get_member(uid) for uid in giveaway_entries[msg.id] if ctx.guild.get_member(uid)]
 
         if len(valid_entries) < winners:
             final_embed = discord.Embed(
                 title=centered_title,
                 description=f"{arrow} **Ended on:** {now.strftime('%d %b %Y, %I:%M %p IST')}\n{arrow} **Winners:** Not enough entries.\n{arrow} **Hosted by:** {host_tag}",
-                color=discord.Color.dark_blue()
+                color=light_blue
             )
-            final_embed.set_footer(text="Click the button below to enter!")
-            view.entry_button.label = f"🟢 {len(view.entries)} Entries"
-            await msg.edit(embed=final_embed, view=view)
-            return await channel.send(f"**Not enough entries to select winners. **", reference=msg)
+            final_embed.set_footer(text="Giveaway Ended")
+            await msg.edit(embed=final_embed)
+            return await channel.send(f"**Not enough entries to select winners.**", reference=msg)
 
         chosen = random.sample(valid_entries, winners)
         giveaway_winners[msg.id] = [m.id for m in chosen]
@@ -294,53 +205,59 @@ async def giveaway(ctx):
         final_embed = discord.Embed(
             title=centered_title,
             description=f"{arrow} **Ended on:** {now.strftime('%d %b %Y, %I:%M %p IST')}\n{arrow} **Winners:** {mentions}\n{arrow} **Hosted by:** {host_tag}",
-            color=discord.Color.dark_blue()
+            color=light_blue
         )
-        final_embed.set_footer(text="Click the button below to enter!")
-        view.entry_button.label = f"🟢 {len(view.entries)} Entries"
-
-        await msg.edit(embed=final_embed, view=view)
-        await channel.send(f"**🎉  Congratulations {mentions}! You’ve won `{prize}`!**", reference=msg)
+        final_embed.set_footer(text="Giveaway Ended")
+        await msg.edit(embed=final_embed)
+        await channel.send(f"🎉 Congratulations {mentions}! You’ve won `{prize}`!", reference=msg)
 
         giveaway_ended_embeds[msg.id] = final_embed
     except asyncio.CancelledError:
         return
 
+@bot.event
+async def on_reaction_add(reaction, user):
+    if user.bot:
+        return
+    msg = reaction.message
+    if msg.id not in giveaway_messages:
+        return
+    if msg.embeds and "Giveaway Ended" in msg.embeds[0].footer.text:
+        try: await reaction.remove(user)
+        except: pass
+        return
+    if str(reaction.emoji) != reaction_emoji:
+        try: await reaction.remove(user)
+        except: pass
+        return
+    if user.id not in giveaway_entries[msg.id]:
+        giveaway_entries[msg.id].append(user.id)
+
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def giveawaycancel(ctx, message_id: int = None):
+    if str(ctx.guild.id) not in activated_servers:
+        return
     if not message_id:
-        return await ctx.send(embed=discord.Embed(
-            description=" Please provide a valid giveaway message ID.",
-            color=discord.Color.red()))
-
+        return await ctx.send(embed=discord.Embed(description="Provide a valid giveaway message ID.", color=discord.Color.red()))
     msg = giveaway_messages.get(message_id)
     if not msg:
-        try:
-            msg = await ctx.channel.fetch_message(message_id)
-        except:
-            return await ctx.send(embed=discord.Embed(
-                description=" Giveaway not found.",
-                color=discord.Color.red()))
-
-    try:
-        await msg.delete()
-    except:
-        pass
-
+        return await ctx.send(embed=discord.Embed(description="Giveaway not found.", color=discord.Color.red()))
+    try: await msg.delete()
+    except: pass
     giveaway_entries.pop(message_id, None)
     giveaway_messages.pop(message_id, None)
     giveaway_winners.pop(message_id, None)
     giveaway_ended_embeds.pop(message_id, None)
     rerolled_history.pop(message_id, None)
-
-    await ctx.send(embed=discord.Embed(
-        description=" Giveaway canceled successfully.",
-        color=discord.Color.red()))
+    await ctx.send(embed=discord.Embed(description="Giveaway canceled successfully.", color=discord.Color.red()))
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def reroll(ctx, message_id: int):
+    if str(ctx.guild.id) not in activated_servers:
+        return
+
     mentions = ctx.message.mentions
     msg = giveaway_messages.get(message_id)
     entries = giveaway_entries.get(message_id, [])
@@ -378,20 +295,53 @@ async def reroll(ctx, message_id: int):
     new_mentions = [ctx.guild.get_member(uid).mention for uid in updated_winner_ids]
     embed = giveaway_ended_embeds.get(message_id)
     if not embed:
-        return await ctx.send(" Final giveaway state not found.")
+        return await ctx.send("Final giveaway state not found.")
 
+    # Update embed description
     lines = embed.description.split("\n")
-    arrow = "<:Screenshot20250709102722:1392369398727049237>"
     for i, line in enumerate(lines):
         if "**Winners:**" in line:
             lines[i] = f"{arrow} **Winners:** {', '.join(new_mentions)}"
 
-    updated_embed = discord.Embed(title=embed.title, description="\n".join(lines), color=discord.Color.dark_blue())
-    updated_embed.set_footer(text=embed.footer.text)
+    updated_embed = discord.Embed(title=embed.title, description="\n".join(lines), color=light_blue)
+    updated_embed.set_footer(text="Giveaway Ended")
     await msg.edit(embed=updated_embed)
-    await msg.channel.send(f"**🎉  Updated Final Winners: {', '.join(new_mentions)}**", reference=msg)
 
-# --- Flask Keep Alive ---
+    # Always send update in original giveaway channel, as a reply
+    await msg.channel.send(
+        f"🎉 Updated Final Winners: {', '.join(new_mentions)}",
+        reference=msg
+    )
+
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def deactivate(ctx):
+    if str(ctx.guild.id) not in activated_servers:
+        return await ctx.send("Bot is already deactivated in this server.")
+    activated_servers.remove(str(ctx.guild.id))
+    with open(ACTIVATION_FILE, "w") as f:
+        json.dump(activated_servers, f)
+    await ctx.send("Bot has been deactivated in this server.")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def reactivate(ctx):
+    if str(ctx.guild.id) in activated_servers:
+        return await ctx.send("Bot is already active.")
+    activated_servers.append(str(ctx.guild.id))
+    with open(ACTIVATION_FILE, "w") as f:
+        json.dump(activated_servers, f)
+    await ctx.send("Bot has been reactivated.")
+
+@bot.event
+async def on_guild_join(guild):
+    if str(guild.id) not in activated_servers:
+        activated_servers.append(str(guild.id))
+        with open(ACTIVATION_FILE, "w") as f:
+            json.dump(activated_servers, f)
+
+# Flask keep-alive
 app = Flask('')
 
 @app.route('/')
